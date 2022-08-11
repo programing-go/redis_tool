@@ -1,4 +1,6 @@
 *.o
 *.txt
 *.log
-redis_tool
+redis_tool_linux*
+/release
+
