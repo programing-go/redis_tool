@@ -83,7 +83,7 @@ func init() {
 	flag.Parse()
 	// redis_tool -src redis://localhost:6379/0 -dst redis://localhost:6379/0 -r "Aliyun:shareIDRemBack,Aliyun:shareIDRemBack1"
 	if pattern == "" && renameVar == "" {
-		fmt.Println("匹配规则pattern或rename参数不能为空!")
+		log.Println("匹配规则pattern或rename参数不能为空!")
 		os.Exit(1)
 	}
 	mode = "cross"
@@ -91,30 +91,30 @@ func init() {
 		mode = "rename"
 		keyList := strings.Split(renameVar, ",")
 		if len(keyList) != 2 {
-			fmt.Println("rename参数格式错误!")
+			log.Println("rename参数格式错误!")
 			os.Exit(1)
 		}
 		srcKey = keyList[0]
 		dstKey = keyList[1]
 		if srcKey == "" || dstKey == "" {
-			fmt.Println("重命名redis的srckey和dstkey参数不能为空!")
+			log.Println("重命名redis的srckey和dstkey参数不能为空!")
 			os.Exit(1)
 		}
 		if srcKey == dstKey {
-			fmt.Println("重命名redis的srckey和dstkey参数不能相同!请使用 pattern复制模式")
+			log.Println("重命名redis的srckey和dstkey参数不能相同!请使用 pattern复制模式")
 			os.Exit(1)
 		}
 	}
 	if dstUri == "" {
-		fmt.Println("请输入目标库redis的地址")
+		log.Println("请输入目标库redis的地址")
 		os.Exit(1)
 	}
 	if srcUri == "" {
-		fmt.Println("请输入原始库redis的地址")
+		log.Println("请输入原始库redis的地址")
 		os.Exit(1)
 	}
 	if maxCount <= 0 {
-		fmt.Println("请输入每次迁移的数据量")
+		log.Println("请输入每次迁移的数据量")
 		os.Exit(1)
 	}
 	sAddr, sPass, sDb := decodeRedisUri(srcUri)
@@ -293,13 +293,13 @@ func CopyRedisData(oldKey, newKey string) error {
 			return errors.New("删除oldKey失败, " + err.Error())
 		}
 	}
-	fmt.Printf("迁移%d条数据成功\n", total)
+	log.Printf("迁移%d条数据成功\n", total)
 	return nil
 }
 
 func MoveRedisData() {
 	// 根据pattern 获取 keys
-	fmt.Println("模式: cross")
+	log.Println("模式: cross")
 	keys, err := rdb_src.Keys(ctx, pattern).Result()
 	if err != nil {
 		log.Println(err)
@@ -311,13 +311,21 @@ func MoveRedisData() {
 	}
 	// 批量添加数据
 	for _, key := range keys {
-		CopyRedisData(key, key)
+		err := CopyRedisData(key, key)
+		if err != nil {
+			log.Println(err)
+			return // 只要有一条失败，就退出
+		}
 	}
 }
 
 func RenameRedisData() {
-	fmt.Println("模式: rename")
-	CopyRedisData(srcKey, dstKey)
+	log.Println("模式: rename")
+	err := CopyRedisData(srcKey, dstKey)
+	if err != nil {
+		log.Println(err)
+		return
+	}
 }
 func main() {
 	if mode == "cross" {
