@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/url"
 	"os"
@@ -29,7 +30,8 @@ var (
 	srcUri   string // 源redis的uri
 	dstUri   string // 目标redis的uri
 	mode     string // 迁移模式 跨库 或 同库迁移模式，默认为跨库迁移模式，
-
+	loadFile string // load模式导入的数据
+	tbName   string // load模式导入的table
 )
 
 func decodeRedisUri(uri string) (addr, pass string, db int) {
@@ -69,7 +71,8 @@ func init() {
 		fmt.Println("\t-maxCount       : 单次SCAN提取的记录数,防止数据量过多导致redis连接超时,默认: 100")
 		fmt.Println("\t-p|-pattern     : 批量key跨库拷贝。redis的key的匹配规则,默认: 空, 可以使用通配符: *,?,例如: xxx*")
 		fmt.Println("\t-r|-rename      : 单Key重命名拷贝式。重命名redis的srckey和dstkey,冒号分隔,默认: 空，例如 srckey,dstkey")
-
+		fmt.Println("\t-l|-load <file> : 导入SET数据")
+		fmt.Println("\t-table <setname> : 导入SET表名")
 	}
 	// 参数说明：
 	flag.StringVar(&srcUri, "src", "redis://localhost:6379/0", "原始库redis的地址")
@@ -82,12 +85,18 @@ func init() {
 	var renameVar string
 	flag.StringVar(&renameVar, "rename", "", "同库迁移,重命名redis的srckey和dstkey,冒号分隔,默认: 空，例如 srckey,dstkey")
 	flag.StringVar(&renameVar, "r", "", "同库迁移,重命名redis的srckey和dstkey,逗号分隔,默认: 空，例如 srckey,dstkey")
+
+	flag.StringVar(&loadFile, "l", "", "导入SET数据.")
+	flag.StringVar(&loadFile, "load", "", "导入SET数据.")
+	flag.StringVar(&tbName, "table", "", "导入的表名")
 	flag.Parse()
+
 	// redis_tool -src redis://localhost:6379/0 -dst redis://localhost:6379/0 -r "Aliyun:shareIDRemBack,Aliyun:shareIDRemBack1"
-	if pattern == "" && renameVar == "" {
-		log.Println("匹配规则pattern或rename参数不能为空!")
+	if pattern == "" && renameVar == "" && loadFile == "" {
+		log.Println("匹配规则 pattern rename 或 loadFile 参数不能都为空!")
 		os.Exit(1)
 	}
+
 	mode = "cross"
 	if renameVar != "" {
 		mode = "rename"
@@ -107,9 +116,8 @@ func init() {
 			os.Exit(1)
 		}
 	}
-	if dstUri == "" {
-		log.Println("请输入目标库redis的地址")
-		os.Exit(1)
+	if loadFile != "" {
+		mode = "loader"
 	}
 	if srcUri == "" {
 		log.Println("请输入原始库redis的地址")
@@ -120,7 +128,6 @@ func init() {
 		os.Exit(1)
 	}
 	sAddr, sPass, sDb := decodeRedisUri(srcUri)
-	dAddr, dPass, dDb := decodeRedisUri(dstUri)
 
 	rdb_src = redis.NewClient(&redis.Options{
 		Addr:     sAddr,
@@ -132,16 +139,49 @@ func init() {
 		log.Println("输入源:", srcUri, ", redis连接失败!原因:", err)
 		os.Exit(2)
 	}
-	rdb_dst = redis.NewClient(&redis.Options{
-		Addr:     dAddr,
-		Password: dPass,
-		DB:       dDb,
-	})
-	if _, err := rdb_dst.Ping(ctx).Result(); err != nil {
-		log.Println("输出源:", dstUri, ", redis连接失败!原因:", err)
-		os.Exit(2)
+	log.Println("redis_src连接成功!")
+
+	if mode != "loader" {
+		if dstUri == "" {
+			log.Println("请输入目标库redis的地址")
+			os.Exit(1)
+		}
+		dAddr, dPass, dDb := decodeRedisUri(dstUri)
+		rdb_dst = redis.NewClient(&redis.Options{
+			Addr:     dAddr,
+			Password: dPass,
+			DB:       dDb,
+		})
+		if _, err := rdb_dst.Ping(ctx).Result(); err != nil {
+			log.Println("输出源:", dstUri, ", redis连接失败!原因:", err)
+			os.Exit(2)
+		}
+		log.Println("redis_dst连接成功!")
 	}
-	log.Println("redis连接成功!")
+}
+
+// 支持Set类型数据导入
+func LoadFileData() {
+	file, err := os.OpenFile(loadFile, os.O_RDONLY, 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatal(err)
+	}
+	loadData := strings.Fields(string(content))
+
+	var data []interface{}
+	for _, v := range loadData {
+		data = append(data, v)
+	}
+	err = rdb_src.SAdd(ctx, tbName, data...).Err()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println("导入数据完成:len:", len(data))
 }
 
 func CopyRedisData(oldKey, newKey string) error {
@@ -334,5 +374,9 @@ func main() {
 		MoveRedisData()
 	} else if mode == "rename" {
 		RenameRedisData()
+	} else if mode == "loader" {
+		LoadFileData()
+	} else {
+		log.Println("啥也没干...")
 	}
 }
