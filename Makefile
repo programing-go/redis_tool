@@ -22,9 +22,10 @@ arm64:
 	GOARCH=arm64 GOOS=linux go build -o ${bindir}/redis_tool_linux_arm64    redis_tool.go ${LDFALGS}
 
 gzip: ${bindir}/*
+	rm -f ${bindir}/*.gz
 	gzip -9 ${bindir}/*
 
 clean:
-	-rm -f ${bindir}/redis_tool
+	-rm -f ${bindir}/redis_tool*
 
 

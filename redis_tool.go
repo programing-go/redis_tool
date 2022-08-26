@@ -60,14 +60,15 @@ func init() {
 		fmt.Println("功能说明:")
 		fmt.Println("\t支持redis全类型数据迁移工具")
 		fmt.Println("使用方法:")
-		fmt.Println("\tredis_tool -src source -dst destination -p pattern\n")
+		fmt.Println("\t批量key跨库拷贝: redis_tool -src source -dst destination -p pattern\n")
+		fmt.Println("\t单Key重命名拷贝: redis_tool -src source -dst destination -r srckey,dstkey\n")
 		fmt.Println("参数说明:")
 		fmt.Println("\t-src		: 原始库redis的地址,默认: redis://localhost:6379/0")
 		fmt.Println("\t-dst		: 目标库redis的地址,默认: redis://localhost:6379/1")
-		fmt.Println("\t-delete: 是否删除redis的数据,默认不删除，请谨慎使用!,默认: false")
-		fmt.Println("\t-maxCount: 单次SCAN提取的记录数,防止数据量过多导致redis连接超时,默认: 100")
-		fmt.Println("\t-p|-pattern: 不同库复制拷贝模式。redis的key的匹配规则,默认: 空, 可以使用通配符: *,?,例如: xxx*")
-		fmt.Println("\t-r|-rename: 重命名复制模式。重命名redis的srckey和dstkey,冒号分隔,默认: 空，例如 srckey:dstkey")
+		fmt.Println("\t-d|-delete      : 是否删除redis的数据,默认不删除，请谨慎使用!,默认: false")
+		fmt.Println("\t-maxCount       : 单次SCAN提取的记录数,防止数据量过多导致redis连接超时,默认: 100")
+		fmt.Println("\t-p|-pattern     : 批量key跨库拷贝。redis的key的匹配规则,默认: 空, 可以使用通配符: *,?,例如: xxx*")
+		fmt.Println("\t-r|-rename      : 单Key重命名拷贝式。重命名redis的srckey和dstkey,冒号分隔,默认: 空，例如 srckey,dstkey")
 
 	}
 	// 参数说明：
@@ -76,9 +77,10 @@ func init() {
 	flag.StringVar(&pattern, "p", "", "跨库迁移,redis的key的匹配规则")
 	flag.StringVar(&pattern, "pattern", "", "跨库迁移,redis的key的匹配规则")
 	flag.BoolVar(&isDelete, "delete", false, "是否删除redis的数据")
+	flag.BoolVar(&isDelete, "d", false, "是否删除redis的数据")
 	flag.IntVar(&maxCount, "maxCount", 100, "单次SCAN提取的记录数,防止数据量过多导致redis连接超时.")
 	var renameVar string
-	flag.StringVar(&renameVar, "rename", "", "同库迁移,重命名redis的srckey和dstkey,冒号分隔,默认: 空，例如 srckey:dstkey")
+	flag.StringVar(&renameVar, "rename", "", "同库迁移,重命名redis的srckey和dstkey,冒号分隔,默认: 空，例如 srckey,dstkey")
 	flag.StringVar(&renameVar, "r", "", "同库迁移,重命名redis的srckey和dstkey,逗号分隔,默认: 空，例如 srckey,dstkey")
 	flag.Parse()
 	// redis_tool -src redis://localhost:6379/0 -dst redis://localhost:6379/0 -r "Aliyun:shareIDRemBack,Aliyun:shareIDRemBack1"
