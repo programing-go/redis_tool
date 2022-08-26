@@ -64,7 +64,7 @@ func init() {
 		fmt.Println("\t单Key重命名拷贝: redis_tool -src source -dst destination -r srckey,dstkey\n")
 		fmt.Println("参数说明:")
 		fmt.Println("\t-src		: 原始库redis的地址,默认: redis://localhost:6379/0")
-		fmt.Println("\t-dst		: 目标库redis的地址,默认: redis://localhost:6379/1")
+		fmt.Println("\t-dst		: 目标库redis的地址,默认: 空")
 		fmt.Println("\t-d|-delete      : 是否删除redis的数据,默认不删除，请谨慎使用!,默认: false")
 		fmt.Println("\t-maxCount       : 单次SCAN提取的记录数,防止数据量过多导致redis连接超时,默认: 100")
 		fmt.Println("\t-p|-pattern     : 批量key跨库拷贝。redis的key的匹配规则,默认: 空, 可以使用通配符: *,?,例如: xxx*")
@@ -73,7 +73,7 @@ func init() {
 	}
 	// 参数说明：
 	flag.StringVar(&srcUri, "src", "redis://localhost:6379/0", "原始库redis的地址")
-	flag.StringVar(&dstUri, "dst", "redis://localhost:6379/1", "目标库redis的地址")
+	flag.StringVar(&dstUri, "dst", "", "目标库redis的地址")
 	flag.StringVar(&pattern, "p", "", "跨库迁移,redis的key的匹配规则")
 	flag.StringVar(&pattern, "pattern", "", "跨库迁移,redis的key的匹配规则")
 	flag.BoolVar(&isDelete, "delete", false, "是否删除redis的数据")
