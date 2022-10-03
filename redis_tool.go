@@ -335,7 +335,8 @@ func CopyRedisData(oldKey, newKey string) error {
 			return errors.New("删除oldKey失败, " + err.Error())
 		}
 	}
-	log.Printf("迁移%d条数据成功\n", total)
+	// 表类型、名称、操作记录数
+	log.Printf("类型: %5s , 名称: %25s ,成功迁移数据: %15d 条!\n", srcType, oldKey, total)
 	return nil
 }
 
