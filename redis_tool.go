@@ -8,14 +8,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
 
-	"github.com/go-redis/redis/v8"
+	redis "github.com/go-redis/redis/v8"
 )
 
 var (
@@ -32,26 +31,38 @@ var (
 	mode     string // 迁移模式 跨库 或 同库迁移模式，默认为跨库迁移模式，
 	loadFile string // load模式导入的数据
 	tbName   string // load模式导入的table
+	outFile  string // 导出输出文件
 )
 
 func decodeRedisUri(uri string) (addr, pass string, db int) {
-	u, err := url.Parse(uri)
+	// uri 格式可能是 redis://password@host:port/0
+
+	// 解析密码部分
+	passIndex := strings.Index(uri, "://")
+	if passIndex != -1 {
+		passIndex += len("://")
+		uri = uri[passIndex:]
+		passEndIndex := strings.Index(uri, "@")
+		if passEndIndex != -1 {
+			pass = uri[:passEndIndex]
+			uri = uri[passEndIndex+1:]
+		}
+	}
+
+	// 解析地址部分
+	addrEndIndex := strings.Index(uri, "/")
+	if addrEndIndex != -1 {
+		addr = uri[:addrEndIndex]
+		uri = uri[addrEndIndex+1:]
+	}
+
+	// 解析DB部分
+	db, err := strconv.Atoi(uri)
 	if err != nil {
 		log.Println("redis uri 解析失败!", err)
 		os.Exit(1)
 	}
-	addr = u.Host
-	pass = u.User.String()
-	if u.Path == "" || u.Path == "/" {
-		log.Println("没有识别到redis的db!")
-		os.Exit(1)
-	} else {
-		db, err = strconv.Atoi(u.Path[1:])
-		if err != nil {
-			log.Println("redis uri 解析失败!", err)
-			os.Exit(1)
-		}
-	}
+
 	return
 }
 
@@ -64,6 +75,7 @@ func init() {
 		fmt.Println("使用方法:")
 		fmt.Println("\t批量key跨库拷贝: redis_tool -src source -dst destination -p pattern")
 		fmt.Println("\t单Key重命名拷贝: redis_tool -src source -dst destination -r srckey,dstkey")
+		fmt.Println("\t批量导入Set数据: redis_tool -src source -l file -table myset")
 		fmt.Println("参数说明:")
 		fmt.Println("\t-src		: 原始库redis的地址,默认: redis://localhost:6379/0")
 		fmt.Println("\t-dst		: 目标库redis的地址,默认: 空")
@@ -73,6 +85,7 @@ func init() {
 		fmt.Println("\t-r|-rename      : 单Key重命名拷贝式。重命名redis的srckey和dstkey,冒号分隔,默认: 空，例如 srckey,dstkey")
 		fmt.Println("\t-l|-load <file> : 导入SET数据")
 		fmt.Println("\t-table <setname> : 导入SET表名")
+		fmt.Println("\t-o export_outfile : 导出数据到文件")
 	}
 	// 参数说明：
 	flag.StringVar(&srcUri, "src", "redis://localhost:6379/0", "原始库redis的地址")
@@ -88,17 +101,20 @@ func init() {
 
 	flag.StringVar(&loadFile, "l", "", "导入SET数据.")
 	flag.StringVar(&loadFile, "load", "", "导入SET数据.")
-	flag.StringVar(&tbName, "table", "", "导入的表名")
+	flag.StringVar(&tbName, "table", "", "导入/导出的表名")
+	flag.StringVar(&outFile, "o", "", "导出文件名")
 	flag.Parse()
 
 	// redis_tool -src redis://localhost:6379/0 -dst redis://localhost:6379/0 -r "Aliyun:shareIDRemBack,Aliyun:shareIDRemBack1"
-	if pattern == "" && renameVar == "" && loadFile == "" {
+	if pattern == "" && renameVar == "" && loadFile == "" && outFile == "" {
 		log.Println("匹配规则 pattern rename 或 loadFile 参数不能都为空!")
 		os.Exit(1)
 	}
 
 	mode = "cross"
-	if renameVar != "" {
+	if outFile != "" {
+		mode = "export"
+	} else if renameVar != "" { //rename mode
 		mode = "rename"
 		keyList := strings.Split(renameVar, ",")
 		if len(keyList) != 2 {
@@ -115,8 +131,7 @@ func init() {
 			log.Println("重命名redis的srckey和dstkey参数不能相同!请使用 pattern复制模式")
 			os.Exit(1)
 		}
-	}
-	if loadFile != "" {
+	} else if loadFile != "" {
 		mode = "loader"
 	}
 	if srcUri == "" {
@@ -141,7 +156,7 @@ func init() {
 	}
 	log.Println("redis_src连接成功!")
 
-	if mode != "loader" {
+	if mode == "cross" || mode == "rename" {
 		if dstUri == "" {
 			log.Println("请输入目标库redis的地址")
 			os.Exit(1)
@@ -160,6 +175,103 @@ func init() {
 	}
 }
 
+func ExportRedisData() error {
+	file, err := os.OpenFile(outFile, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+	skey, err := rdb_src.Keys(ctx, tbName).Result()
+
+	if err != nil {
+		return errors.New("获取oldKey失败, " + err.Error())
+	}
+	if len(skey) == 0 {
+		return errors.New("oldKey不存在")
+	}
+	if len(skey) > 1 {
+		return fmt.Errorf("oldKey存在[ %d ]个, oldKey:[%s]", len(skey), tbName)
+	}
+	// 判断oldKey类型
+	rtype, err := rdb_src.Type(ctx, tbName).Result()
+	if err != nil {
+		return errors.New("获取oldKey类型失败, " + err.Error())
+	}
+	if rtype != "string" && rtype != "hash" && rtype != "list" && rtype != "set" && rtype != "zset" {
+		return errors.New("oldKey类型不支持")
+	}
+	srcType := rtype
+	total := 0 // 记录操作记录的总数
+	// 开始根据srcType类型迁移数据
+	if srcType == "string" {
+		// 获取key的值
+		data, err := rdb_src.Get(ctx, tbName).Result()
+		if err != nil {
+			return errors.New("获取oldKey值失败, " + err.Error())
+		}
+		//
+		fmt.Println(data)
+		total++
+	} else if srcType == "hash" {
+		// 获取key的值
+		data, err := rdb_src.HGetAll(ctx, tbName).Result()
+		if err != nil {
+			return errors.New("获取oldKey值失败, " + err.Error())
+		}
+		for _, v := range data {
+			fmt.Println(v)
+		}
+		total += len(data)
+	} else if srcType == "list" {
+		// 获取key的值
+		// 循环 获取数据，每次获取maxCount个数据
+		var cursor int64 = 0
+		for {
+			data, err := rdb_src.LRange(ctx, tbName, cursor, cursor+int64(maxCount)).Result()
+			if err != nil {
+				return errors.New("获取oldKey值失败, " + err.Error())
+			}
+			if len(data) == 0 {
+				break
+			}
+			for _, v := range data {
+				file.WriteString(v)
+				file.WriteString("\n")
+			}
+			total += len(data)
+			cursor += int64(len(data))
+		}
+
+	} else if srcType == "set" {
+		// 获取key的值
+		var cursor uint64 = 0
+		for {
+			data, next_cursor, err := rdb_src.SScan(ctx, tbName, cursor, "", int64(maxCount)).Result()
+			if err != nil {
+				return errors.New("获取oldKey值失败, " + err.Error())
+			}
+			if len(data) == 0 {
+				break
+			}
+			for _, v := range data {
+				file.WriteString(v)
+				file.WriteString("\n")
+				if isDelete {
+					rdb_src.SRem(ctx, tbName, data)
+				}
+			}
+			total += len(data)
+			if next_cursor == 0 {
+				break
+			}
+			cursor = next_cursor
+		}
+	} else {
+		return errors.New("oldKey类型不支持")
+	}
+	return nil
+}
+
 // 支持Set类型数据导入
 func LoadFileData() {
 	file, err := os.OpenFile(loadFile, os.O_RDONLY, 0)
@@ -167,7 +279,7 @@ func LoadFileData() {
 		log.Fatal(err)
 	}
 	defer file.Close()
-	content, err := ioutil.ReadAll(file)
+	content, err := io.ReadAll(file)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -371,7 +483,10 @@ func RenameRedisData() {
 	}
 }
 func main() {
-	if mode == "cross" {
+	if mode == "export" {
+		// export data
+		ExportRedisData()
+	} else if mode == "cross" {
 		MoveRedisData()
 	} else if mode == "rename" {
 		RenameRedisData()
