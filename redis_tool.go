@@ -283,11 +283,12 @@ func LoadFileData() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	loadData := strings.Fields(string(content))
-
+	loadData := strings.Split(string(content), "\n")
 	var data []interface{}
 	for _, v := range loadData {
-		data = append(data, v)
+		if strings.Trim(v, " ") != "" {
+			data = append(data, v)
+		}
 	}
 	err = rdb_src.SAdd(ctx, tbName, data...).Err()
 	if err != nil {
