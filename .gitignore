@@ -3,4 +3,4 @@
 *.log
 redis_tool_linux*
 /release
-
+redis_tool

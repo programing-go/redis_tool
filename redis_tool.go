@@ -10,11 +10,18 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/url"
 	"os"
+	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 
-	redis "github.com/go-redis/redis/v8"
+	"github.com/kevinburke/ssh_config"
+	redis "github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 var (
@@ -32,36 +39,224 @@ var (
 	loadFile string // load模式导入的数据
 	tbName   string // load模式导入的table
 	outFile  string // 导出输出文件
+	commit   string // 提交版本信息
 )
 
-func decodeRedisUri(uri string) (addr, pass string, db int) {
-	// uri 格式可能是 redis://password@host:port/0
+type SSHInfo struct {
+	Host         string
+	Port         string
+	User         string
+	Password     string
+	IdentityFile string
+	Passphrase   string
+}
 
-	// 解析密码部分
-	passIndex := strings.Index(uri, "://")
-	if passIndex != -1 {
-		passIndex += len("://")
-		uri = uri[passIndex:]
-		passEndIndex := strings.Index(uri, "@")
-		if passEndIndex != -1 {
-			pass = uri[:passEndIndex]
-			uri = uri[passEndIndex+1:]
-		}
+func errCallBack(e error) {
+	if e != nil {
+		log.Fatal(e)
 	}
+}
 
-	// 解析地址部分
-	addrEndIndex := strings.Index(uri, "/")
-	if addrEndIndex != -1 {
-		addr = uri[:addrEndIndex]
-		uri = uri[addrEndIndex+1:]
-	}
+func connectRedis(rHost, rPort, rPass string, rDb int) *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:     net.JoinHostPort(rHost, rPort),
+		Password: rPass,
+		DB:       rDb,
+	})
+}
 
-	// 解析DB部分
-	db, err := strconv.Atoi(uri)
+// "redis://<user>:<pass>@localhost:6379/<db>"
+// "redissh://<user>:<pass>@sshhost:6379/<db>"
+func InitDB(redisURL string, sshInfo *SSHInfo) (rdb *redis.Client) {
+
+	u, err := url.Parse(redisURL)
 	if err != nil {
-		log.Println("redis uri 解析失败!", err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
+	rHost := u.Hostname()
+	rPort := u.Port()
+	rPass, _ := u.User.Password()
+	rDb, _ := strconv.Atoi(u.Path[1:])
+	switch u.Scheme {
+	case "redis":
+		rdb = connectRedis(rHost, rPort, rPass, rDb)
+	case "redissh":
+		sshHost := rHost
+		sshPort := ""
+		sshUser := ""
+		sshPass := ""
+		sshFile := ""
+		sshPassphrase := ""
+		if sshInfo != nil {
+			if sshInfo.Host != "" { // 默认使用redis_URI的Host
+				sshHost = sshInfo.Host
+			}
+			sshPort = sshInfo.Port
+			sshUser = sshInfo.User
+			sshPass = sshInfo.Password
+			sshFile = sshInfo.IdentityFile
+			sshPassphrase = sshInfo.Passphrase
+		}
+		rdb = connectRedisWithSSH(rDb, "127.0.0.1", rPort, rPass, sshHost, sshPort, sshUser, sshPass, sshFile, sshPassphrase)
+	default:
+		return nil
+	}
+	//检查 redis 连接
+	if _, err := rdb.Ping(ctx).Result(); err != nil {
+		log.Fatal(err)
+	}
+	return rdb
+}
+
+func expandTilde(path string) string {
+	// 如果路径不以 `~` 开头，直接返回
+	if len(path) < 2 || path[:1] != "~" {
+		return path
+	}
+
+	// 获取当前用户信息
+	usr, err := user.Current()
+	if err != nil {
+		return ""
+	}
+
+	// 将 `~` 替换为当前用户的主目录
+	return filepath.Join(usr.HomeDir, path[1:])
+}
+
+// SSH 方式连接 redis
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true
+	}
+	if os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
+
+func createKnownHosts() {
+	f, fErr := os.OpenFile(filepath.Join(os.Getenv("HOME"), ".ssh", "known_hosts"), os.O_CREATE|os.O_APPEND, 0600)
+	errCallBack(fErr)
+	f.Close()
+}
+func checkKnownHosts() ssh.HostKeyCallback {
+	createKnownHosts()
+	kh, e := knownhosts.New(filepath.Join(os.Getenv("HOME"), ".ssh", "known_hosts"))
+	errCallBack(e)
+	return kh
+}
+func addHostKey(remote net.Addr, pubKey ssh.PublicKey) error {
+	// add host key if host is not found in known_hosts, error object is return, if nil then connection proceeds,
+	// if not nil then connection stops.
+	khFilePath := filepath.Join(os.Getenv("HOME"), ".ssh", "known_hosts")
+
+	f, fErr := os.OpenFile(khFilePath, os.O_APPEND|os.O_WRONLY, 0600)
+	if fErr != nil {
+		return fErr
+	}
+	defer f.Close()
+
+	knownHosts := knownhosts.Normalize(remote.String())
+	_, fileErr := f.WriteString(knownhosts.Line([]string{knownHosts}, pubKey))
+	return fileErr
+}
+
+// 支持多种Redis连接方式
+// 普通方式:URI redis://:password@host:port
+// SSH方式: user+pwd / ssh_key + passphrase
+func connectRedisWithSSH(rDb int, rHost, rPort, rPass,
+	sshHost, sshPort, sshUser, sshPass, sshKey, sshPassphrase string) (rdb *redis.Client) {
+
+	f, err := os.Open(filepath.Join(os.Getenv("HOME"), ".ssh", "config"))
+	if err != nil {
+		log.Fatal(err, "请为 sshHost配置 ~/.ssh/config")
+	}
+	cfg, err := ssh_config.Decode(f)
+	errCallBack(err) // 限制必须配置 ssh_config
+	sHost, _ := cfg.Get(sshHost, "Hostname")
+	sPort, _ := cfg.Get(sshHost, "Port")
+	sUser, _ := cfg.Get(sshHost, "User")
+	sFile, _ := cfg.Get(sshHost, "IdentityFile")
+	if sPort == "" { // 没有配置取默认22端口
+		sPort = "22"
+	}
+	if sshPort != "" {
+		sPort = sshPort
+	}
+	sFile = expandTilde(sFile)
+	if sFile == "" { //默认
+		sFile = filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa")
+	}
+	sAddr := sHost + ":" + sPort
+
+	if sshUser != "" {
+		sUser = sshUser
+	}
+	if sUser == "" { // 没有指定任何用户，取默认登录用户名
+		usr, _ := user.Current()
+		sUser = usr.Username
+	}
+
+	if sshKey != "" {
+		sFile = sshKey
+	}
+
+	var authMethods []ssh.AuthMethod
+	var keyErr *knownhosts.KeyError
+	if sshPass != "" {
+		// 优先使用密码方式
+		authMethods = append(authMethods, ssh.Password(sshPass))
+	}
+	if fileExists(sFile) { // 使用密钥连接
+		key, err := os.ReadFile(sFile)
+		if err != nil {
+			log.Fatalf("unable to read private key: %v", err)
+		}
+
+		signer, err := ssh.ParsePrivateKey(key)
+		if err != nil {
+			log.Fatalf("unable to parse private key: %v", err)
+		}
+		authMethods = append(authMethods, ssh.PublicKeys(signer))
+	}
+	sshConfig := &ssh.ClientConfig{
+		User: sUser,
+		Auth: authMethods,
+		HostKeyCallback: ssh.HostKeyCallback(func(host string, remote net.Addr, pubKey ssh.PublicKey) error {
+			kh := checkKnownHosts()
+			hErr := kh(host, remote, pubKey)
+			// Reference: https://blog.golang.org/go1.13-errors
+			// To understand what errors.As is.
+			if errors.As(hErr, &keyErr) && len(keyErr.Want) > 0 {
+				// Reference: https://www.godoc.org/golang.org/x/crypto/ssh/knownhosts#KeyError
+				// if keyErr.Want slice is empty then host is unknown, if keyErr.Want is not empty
+				// and if host is known then there is key mismatch the connection is then rejected.
+				return keyErr
+			} else if errors.As(hErr, &keyErr) && len(keyErr.Want) == 0 {
+				// host key not found in known_hosts then give a warning and continue to connect.
+				return addHostKey(remote, pubKey)
+			}
+			log.Printf("Pub key exists for %s.", host)
+			return nil
+		}),
+	}
+
+	// Connect to the remote server and perform the SSH handshake.
+	sshClient, err := ssh.Dial("tcp", sAddr, sshConfig)
+	errCallBack(err)
+	rdb = redis.NewClient(&redis.Options{
+		Addr:     net.JoinHostPort(rHost, rPort),
+		Password: rPass,
+		DB:       rDb,
+		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return sshClient.Dial(network, addr)
+		},
+		// Disable timeouts, because SSH does not support deadlines.
+		ReadTimeout:  -2,
+		WriteTimeout: -2,
+	})
 
 	return
 }
@@ -77,7 +272,7 @@ func init() {
 		fmt.Println("\t单Key重命名拷贝: redis_tool -src source -dst destination -r srckey,dstkey")
 		fmt.Println("\t批量导入Set数据: redis_tool -src source -l file -table myset")
 		fmt.Println("参数说明:")
-		fmt.Println("\t-src		: 原始库redis的地址,默认: redis://localhost:6379/0")
+		fmt.Println("\t-src		: 原始库redis的地址,默认: redis://localhost:6379/0，ssh格式: redissh://[user:pass@]host:6379/0")
 		fmt.Println("\t-dst		: 目标库redis的地址,默认: 空")
 		fmt.Println("\t-d|-delete      : 是否删除redis的数据,默认不删除，请谨慎使用!,默认: false")
 		fmt.Println("\t-maxCount       : 单次SCAN提取的记录数,防止数据量过多导致redis连接超时,默认: 100")
@@ -86,6 +281,7 @@ func init() {
 		fmt.Println("\t-l|-load <file> : 导入SET数据")
 		fmt.Println("\t-table <setname> : 导入SET表名")
 		fmt.Println("\t-o export_outfile : 导出数据到文件")
+		fmt.Println("\t-v | -version     : 版本号信息")
 	}
 	// 参数说明：
 	flag.StringVar(&srcUri, "src", "redis://localhost:6379/0", "原始库redis的地址")
@@ -103,8 +299,15 @@ func init() {
 	flag.StringVar(&loadFile, "load", "", "导入SET数据.")
 	flag.StringVar(&tbName, "table", "", "导入/导出的表名")
 	flag.StringVar(&outFile, "o", "", "导出文件名")
+	var version bool
+	flag.BoolVar(&version, "v", false, "显示版本信息")
+	flag.BoolVar(&version, "version", false, "显示版本信息")
 	flag.Parse()
 
+	if version {
+		fmt.Println("reids_tool version: ", commit)
+		os.Exit(0)
+	}
 	// redis_tool -src redis://localhost:6379/0 -dst redis://localhost:6379/0 -r "Aliyun:shareIDRemBack,Aliyun:shareIDRemBack1"
 	if pattern == "" && renameVar == "" && loadFile == "" && outFile == "" {
 		log.Println("匹配规则 pattern rename 或 loadFile 参数不能都为空!")
@@ -142,18 +345,7 @@ func init() {
 		log.Println("请输入每次迁移的数据量")
 		os.Exit(1)
 	}
-	sAddr, sPass, sDb := decodeRedisUri(srcUri)
-
-	rdb_src = redis.NewClient(&redis.Options{
-		Addr:     sAddr,
-		Password: sPass,
-		DB:       sDb,
-	})
-	//检查 redis 连接
-	if _, err := rdb_src.Ping(ctx).Result(); err != nil {
-		log.Println("输入源:", srcUri, ", redis连接失败!原因:", err)
-		os.Exit(2)
-	}
+	rdb_src = InitDB(srcUri, nil)
 	log.Println("redis_src连接成功!")
 
 	if mode == "cross" || mode == "rename" {
@@ -161,16 +353,7 @@ func init() {
 			log.Println("请输入目标库redis的地址")
 			os.Exit(1)
 		}
-		dAddr, dPass, dDb := decodeRedisUri(dstUri)
-		rdb_dst = redis.NewClient(&redis.Options{
-			Addr:     dAddr,
-			Password: dPass,
-			DB:       dDb,
-		})
-		if _, err := rdb_dst.Ping(ctx).Result(); err != nil {
-			log.Println("输出源:", dstUri, ", redis连接失败!原因:", err)
-			os.Exit(2)
-		}
+		rdb_dst = InitDB(dstUri, nil)
 		log.Println("redis_dst连接成功!")
 	}
 }
@@ -426,17 +609,12 @@ func CopyRedisData(oldKey, newKey string) error {
 			if len(data) == 0 {
 				break
 			}
-			// 添加数据
-			tmp := make([]*redis.Z, len(data))
-			for i, v := range data {
-				tmp[i] = &v
-			}
-			err = rdb_dst.ZAdd(ctx, newKey, tmp...).Err()
+			err = rdb_dst.ZAdd(ctx, newKey, data...).Err()
 			if err != nil {
 				return errors.New("添加newKey值失败, " + err.Error())
 			}
 			total += len(data)
-			cursor += int64(len(tmp))
+			cursor += int64(len(data))
 		}
 	} else {
 		return errors.New("oldKey类型不支持")
