@@ -262,26 +262,30 @@ func connectRedisWithSSH(rDb int, rHost, rPort, rPass,
 }
 
 func init() {
+	var renameVar string
+	var version bool
 
 	// 功能说明： 支持redis全类型数据迁移工具
+	program_name := os.Args[0]
 	flag.Usage = func() {
 		fmt.Println("功能说明:")
 		fmt.Println("\t支持redis全类型数据迁移工具")
 		fmt.Println("使用方法:")
-		fmt.Println("\t批量key跨库拷贝: redis_tool -src source -dst destination -p pattern")
-		fmt.Println("\t单Key重命名拷贝: redis_tool -src source -dst destination -r srckey,dstkey")
-		fmt.Println("\t批量导入Set数据: redis_tool -src source -l file -table myset")
+		fmt.Printf("\t批量key跨库拷贝: %s -src source -dst destination -p pattern\n", program_name)
+		fmt.Printf("\t单Key重命名拷贝: %s -src source -dst destination -r srckey,dstkey\n", program_name)
+		fmt.Printf("\t批量导入Set数据: %s -src source -l file -table myset\n", program_name)
+		fmt.Printf("\t批量导出Set数据: %s -src source -o file -table myset\n", program_name)
 		fmt.Println("参数说明:")
-		fmt.Println("\t-src		: 原始库redis的地址,默认: redis://localhost:6379/0，ssh格式: redissh://[user:pass@]host:6379/0")
-		fmt.Println("\t-dst		: 目标库redis的地址,默认: 空")
-		fmt.Println("\t-d|-delete      : 是否删除redis的数据,默认不删除，请谨慎使用!,默认: false")
-		fmt.Println("\t-maxCount       : 单次SCAN提取的记录数,防止数据量过多导致redis连接超时,默认: 100")
-		fmt.Println("\t-p|-pattern     : 批量key跨库拷贝。redis的key的匹配规则,默认: 空, 可以使用通配符: *,?,例如: xxx*")
-		fmt.Println("\t-r|-rename      : 单Key重命名拷贝式。重命名redis的srckey和dstkey,冒号分隔,默认: 空，例如 srckey,dstkey")
-		fmt.Println("\t-l|-load <file> : 导入SET数据")
-		fmt.Println("\t-table <setname> : 导入SET表名")
-		fmt.Println("\t-o export_outfile : 导出数据到文件")
-		fmt.Println("\t-v | -version     : 版本号信息")
+		fmt.Println("  -src            : 原始库redis的地址,默认: redis://localhost:6379/0， 支持URI格式: redis://[:password@]localhost:6379/0 或SSH方式 redissh://[:password@]localhost:6379/0")
+		fmt.Println("  -dst            : 目标库redis的地址,默认: 空")
+		fmt.Println("  -d|-delete      : 是否删除redis的数据,默认不删除，请谨慎使用!,默认: false")
+		fmt.Println("  -maxCount       : 单次SCAN提取的记录数,防止数据量过多导致redis连接超时,默认: 100")
+		fmt.Println("  -p|-pattern     : 批量key跨库拷贝。redis的key的匹配规则,默认: 空, 可以使用通配符: *,?,例如: xxx*")
+		fmt.Println("  -r|-rename      : 单Key重命名拷贝式。重命名redis的srckey和dstkey,冒号分隔,默认: 空，例如 srckey,dstkey")
+		fmt.Println("  -l|-load <file> : 导入SET数据")
+		fmt.Println("  -table <name>   : 导入SET表名")
+		fmt.Println("  -o outfile      : 导出数据到文件")
+		fmt.Println("  -v|-version     : 版本号信息")
 	}
 	// 参数说明：
 	flag.StringVar(&srcUri, "src", "redis://localhost:6379/0", "原始库redis的地址")
@@ -291,7 +295,6 @@ func init() {
 	flag.BoolVar(&isDelete, "delete", false, "是否删除redis的数据")
 	flag.BoolVar(&isDelete, "d", false, "是否删除redis的数据")
 	flag.IntVar(&maxCount, "maxCount", 100, "单次SCAN提取的记录数,防止数据量过多导致redis连接超时.")
-	var renameVar string
 	flag.StringVar(&renameVar, "rename", "", "同库迁移,重命名redis的srckey和dstkey,冒号分隔,默认: 空，例如 srckey,dstkey")
 	flag.StringVar(&renameVar, "r", "", "同库迁移,重命名redis的srckey和dstkey,逗号分隔,默认: 空，例如 srckey,dstkey")
 
@@ -299,21 +302,21 @@ func init() {
 	flag.StringVar(&loadFile, "load", "", "导入SET数据.")
 	flag.StringVar(&tbName, "table", "", "导入/导出的表名")
 	flag.StringVar(&outFile, "o", "", "导出文件名")
-	var version bool
 	flag.BoolVar(&version, "v", false, "显示版本信息")
 	flag.BoolVar(&version, "version", false, "显示版本信息")
 	flag.Parse()
 
 	if version {
-		fmt.Println("reids_tool version: ", commit)
+		fmt.Println("redis_tool version: ", commit)
 		os.Exit(0)
 	}
+
 	// redis_tool -src redis://localhost:6379/0 -dst redis://localhost:6379/0 -r "Aliyun:shareIDRemBack,Aliyun:shareIDRemBack1"
 	if pattern == "" && renameVar == "" && loadFile == "" && outFile == "" {
 		log.Println("匹配规则 pattern rename 或 loadFile 参数不能都为空!")
 		os.Exit(1)
 	}
-
+	// 工作模式: cross / rename / export /rename
 	mode = "cross"
 	if outFile != "" {
 		mode = "export"
@@ -655,6 +658,12 @@ func MoveRedisData() {
 
 func RenameRedisData() {
 	log.Println("模式: rename")
+	if srcUri == dstUri {
+		// 不跨库, rename 操作即可
+		status := rdb_src.Rename(ctx, srcKey, dstKey)
+		log.Println(status)
+		return
+	}
 	err := CopyRedisData(srcKey, dstKey)
 	if err != nil {
 		log.Println(err)
